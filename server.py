@@ -96,7 +96,7 @@ class FuncApp(FastAPI):
 
             return ""
 
-        @self.post("/healthz")
+        @self.get("/healthz")
         def healthz():
             return {}
 
