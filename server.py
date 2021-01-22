@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.logger import logger
 from pydantic import BaseModel
+from starlette.responses import RedirectResponse
 import importlib
 import sys
 import os
@@ -29,6 +30,7 @@ class FuncApp(FastAPI):
         super(FuncApp, self).__init__()
 
         self.userfunc = None
+        self.mod = None
         self.root = logging.getLogger()
         self.ch = logging.StreamHandler(sys.stdout)
 
@@ -39,14 +41,14 @@ class FuncApp(FastAPI):
         )
         logger.addHandler(self.ch)
 
-        @self.post("/specialize")
+        @self.post("/specialize", include_in_schema=False)
         def load(request: Request):
             logger.info("/specialize called")
             # load user function from codepath
             self.userfunc = import_src("/userfunc/user").main
             return ""
 
-        @self.post("/v2/specialize")
+        @self.post("/v2/specialize", include_in_schema=False)
         def loadv2(body: Body):
             # body = item.dict()
             logger.info(f"body: {body}")
@@ -93,17 +95,23 @@ class FuncApp(FastAPI):
             self.userfunc = getattr(mod, funcName)
             logger.debug(self.userfunc)
             # return self.userfunc()
+            #import test
+            self.mod = mod
+            #self.include_router(test.router)
+            self.include_router(self.mod.router)
 
             return ""
 
-        @self.get("/healthz")
+        @self.get("/healthz", include_in_schema=False)
         def healthz():
             return {}
 
         @self.api_route(
-            "/", methods=["GET", "POST", "PUT", "HEAD", "OPTIONS", "DELETE"]
+            "/", methods=["GET", "POST", "PUT", "HEAD", "OPTIONS", "DELETE"], include_in_schema=False
         )
-        def f():
+        async def f(request: Request, docs_api: Optional[str] = None):
+            #return requests.get("http://127.0.0.1:8889/docs").content
+
             if self.userfunc is None:
                 print("Generic container: no requests supported")
                 return HTTPException(status_code=500)
@@ -116,17 +124,40 @@ class FuncApp(FastAPI):
             #
             # And the user func can then access that
             # (after doing a"from flask import g").
-
-            return self.userfunc()
-
+            # self.include_router(self.mod.router)
+            print("path: ", request.scope.get("path"))
+            if docs_api:
+                from fastapi.openapi.docs import get_swagger_ui_html
+                root_path = request.scope.get("root_path", "").rstrip("/")
+                oauth2_redirect_url = self.swagger_ui_oauth2_redirect_url
+                if oauth2_redirect_url:
+                    oauth2_redirect_url = root_path + oauth2_redirect_url
+                return get_swagger_ui_html(
+                        openapi_url=self.openapi_url,
+                        title=self.title + " - Swagger UI",
+                        oauth2_redirect_url=oauth2_redirect_url,
+                        init_oauth=self.swagger_ui_init_oauth,
+                    )          
+            #self.setup()
+            try:
+                body = await request.json()
+            except:
+                body = {"echo": "echo official"}
+            return await self.userfunc(body)
 
 app = FuncApp(logging.DEBUG)
 
+from pydantic import BaseModel
+
+class UserBase(BaseModel):
+    username: str
+    email: str
+    full_name: Optional[str] = None
 
 @app.get("/test")
-def root_test():
+def root_test(user_base: UserBase):
     return {"content": "It's working!"}
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8888)
+    uvicorn.run(app, host="0.0.0.0", port=8889)
