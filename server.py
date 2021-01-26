@@ -6,18 +6,24 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.logger import logger
 from pydantic import BaseModel
-from starlette.responses import RedirectResponse
+from fastapi.openapi.docs import get_swagger_ui_html
 import importlib
 import sys
 import os
 import logging
 import uvicorn
+import sentry_sdk
 
-# app = FastAPI()
+SENTRY_DSN = os.environ.get("SENTRY_DSN", None)
+SENTRY_RELEASE = os.environ.get("SENTRY_RELEASE", None)
 
-
-def import_src(path):
-    return importlib.machinery.SourceFileLoader("mod", path).load_module()
+if SENTRY_DSN:
+    params = {
+        "dsn": SENTRY_DSN,
+    }
+    if SENTRY_RELEASE:
+        params["release"] = SENTRY_RELEASE
+    sentry_sdk.init(**params)
 
 
 class Body(BaseModel):
@@ -25,12 +31,16 @@ class Body(BaseModel):
     functionName: Optional[str] = ""
 
 
+def import_src(path):
+    return importlib.machinery.SourceFileLoader("mod", path).load_module()
+
+
 class FuncApp(FastAPI):
     def __init__(self, loglevel=logging.DEBUG):
         super(FuncApp, self).__init__()
 
         self.userfunc = None
-        self.mod = None
+        self.module = None
         self.root = logging.getLogger()
         self.ch = logging.StreamHandler(sys.stdout)
 
@@ -44,14 +54,12 @@ class FuncApp(FastAPI):
         @self.post("/specialize", include_in_schema=False)
         def load(request: Request):
             logger.info("/specialize called")
-            # load user function from codepath
-            self.userfunc = import_src("/userfunc/user").main
+            self.module = import_src("/userfunc/user")
+            self.userfunc = self.module.main
             return ""
 
         @self.post("/v2/specialize", include_in_schema=False)
         def loadv2(body: Body):
-            # body = item.dict()
-            logger.info(f"body: {body}")
             filepath = body.filepath
             handler = body.functionName
             logger.info(
@@ -80,25 +88,18 @@ class FuncApp(FastAPI):
             if os.path.isdir(filepath):
                 # add package directory path into module search path
                 sys.path.append(filepath)
-
                 logger.debug('__package__ = "{}"'.format(__package__))
                 if __package__:
-                    mod = importlib.import_module(moduleName, __package__)
+                    self.module = importlib.import_module(moduleName, __package__)
                 else:
-                    mod = importlib.import_module(moduleName)
-
+                    self.module = importlib.import_module(moduleName)
             else:
                 # load source from destination python file
-                mod = import_src(filepath)
+                self.module = import_src(filepath)
 
             # load user function from module
-            self.userfunc = getattr(mod, funcName)
+            self.userfunc = getattr(self.module, funcName)
             logger.debug(self.userfunc)
-            # return self.userfunc()
-            #import test
-            self.mod = mod
-            #self.include_router(test.router)
-            self.include_router(self.mod.router)
 
             return ""
 
@@ -107,11 +108,15 @@ class FuncApp(FastAPI):
             return {}
 
         @self.api_route(
-            "/", methods=["GET", "POST", "PUT", "HEAD", "OPTIONS", "DELETE"], include_in_schema=False
+            "/",
+            methods=["GET", "POST", "PUT", "HEAD", "OPTIONS", "DELETE"],
+            include_in_schema=False,
         )
-        async def f(request: Request, docs_api: Optional[str] = None):
-            #return requests.get("http://127.0.0.1:8889/docs").content
-
+        async def f(
+            request: Request,
+            docs_func: Optional[str] = None,
+            openapi_json: Optional[str] = None,
+        ):
             if self.userfunc is None:
                 print("Generic container: no requests supported")
                 return HTTPException(status_code=500)
@@ -124,39 +129,46 @@ class FuncApp(FastAPI):
             #
             # And the user func can then access that
             # (after doing a"from flask import g").
-            # self.include_router(self.mod.router)
-            print("path: ", request.scope.get("path"))
-            if docs_api:
-                from fastapi.openapi.docs import get_swagger_ui_html
+
+            # function added in the route to show in url docs if it does not exist yet.
+            for route in self.routes:
+                if self.module.__name__ in route.path:
+                    break
+            else:
+                self.include_router(self.module.router)
+
+            if openapi_json:
+                return self.openapi()
+            if docs_func:
+                self.openapi_url = "?openapi_json=1"
                 root_path = request.scope.get("root_path", "").rstrip("/")
                 oauth2_redirect_url = self.swagger_ui_oauth2_redirect_url
                 if oauth2_redirect_url:
                     oauth2_redirect_url = root_path + oauth2_redirect_url
                 return get_swagger_ui_html(
-                        openapi_url=self.openapi_url,
-                        title=self.title + " - Swagger UI",
-                        oauth2_redirect_url=oauth2_redirect_url,
-                        init_oauth=self.swagger_ui_init_oauth,
-                    )          
-            #self.setup()
+                    openapi_url=self.openapi_url,
+                    title="NOS Functions - Doc",
+                    oauth2_redirect_url=oauth2_redirect_url,
+                    init_oauth=self.swagger_ui_init_oauth,
+                )
+
+            return await self.userfunc(request)
+
+        @self.middleware("http")
+        async def sentry_exception(request: Request, call_next):
             try:
-                body = await request.json()
-            except:
-                body = {"echo": "echo official"}
-            return await self.userfunc(body)
+                response = await call_next(request)
+                return response
+            except Exception as e:
+                with sentry_sdk.push_scope() as scope:
+                    scope.set_context("request", request)
+                    user_id = "database_user_id"  # when available
+                    scope.user = {"ip_address": request.client.host, "id": user_id}
+                    sentry_sdk.capture_exception(e)
+                raise e
+
 
 app = FuncApp(logging.DEBUG)
-
-from pydantic import BaseModel
-
-class UserBase(BaseModel):
-    username: str
-    email: str
-    full_name: Optional[str] = None
-
-@app.get("/test")
-def root_test(user_base: UserBase):
-    return {"content": "It's working!"}
 
 
 if __name__ == "__main__":
