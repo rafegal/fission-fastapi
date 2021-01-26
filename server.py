@@ -56,6 +56,7 @@ class FuncApp(FastAPI):
             logger.info("/specialize called")
             self.module = import_src("/userfunc/user")
             self.userfunc = self.module.main
+            self.include_router(self.module.router)
             return ""
 
         @self.post("/v2/specialize", include_in_schema=False)
@@ -99,7 +100,8 @@ class FuncApp(FastAPI):
 
             # load user function from module
             self.userfunc = getattr(self.module, funcName)
-            logger.debug(self.userfunc)
+
+            self.include_router(self.module.router)
 
             return ""
 
@@ -123,22 +125,11 @@ class FuncApp(FastAPI):
             #
             # Customizing the request context
             #
-            # If you want to pass something to the function, you can
-            # add it to 'g':
-            #   g.myKey = myValue
-            #
-            # And the user func can then access that
-            # (after doing a"from flask import g").
 
-            # function added in the route to show in url docs if it does not exist yet.
-            for route in self.routes:
-                if self.module.__name__ in route.path:
-                    break
-            else:
-                self.include_router(self.module.router)
-
+            # return openapi.json
             if openapi_json:
                 return self.openapi()
+            # return doc page
             if docs_func:
                 self.openapi_url = "?openapi_json=1"
                 root_path = request.scope.get("root_path", "").rstrip("/")
