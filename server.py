@@ -138,7 +138,7 @@ class FuncApp(FastAPI):
                     oauth2_redirect_url = root_path + oauth2_redirect_url
                 return get_swagger_ui_html(
                     openapi_url=self.openapi_url,
-                    title="NOS Functions - Doc",
+                    title="Fission Functions - Doc",
                     oauth2_redirect_url=oauth2_redirect_url,
                     init_oauth=self.swagger_ui_init_oauth,
                 )
